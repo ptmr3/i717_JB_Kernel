@@ -41,7 +41,6 @@
 #define MIN_FREQUENCY_UP_THRESHOLD		(11)
 #define MAX_FREQUENCY_UP_THRESHOLD		(100)
 #define MIN_FREQUENCY_DOWN_DIFFERENTIAL		(1)
-#define DEF_FREQ_STEP				(40)
 
 /*
  * The polling frequency of this governor depends on the capability of
@@ -72,10 +71,10 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 static
 #endif
 struct cpufreq_governor cpufreq_gov_ondemand = {
-	.name                   = "ondemand",
-	.governor               = cpufreq_governor_dbs,
-	.max_transition_latency = TRANSITION_LATENCY_LIMIT,
-	.owner                  = THIS_MODULE,
+       .name                   = "ondemand",
+       .governor               = cpufreq_governor_dbs,
+       .max_transition_latency = TRANSITION_LATENCY_LIMIT,
+       .owner                  = THIS_MODULE,
 };
 
 /* Sampling types */
@@ -126,21 +125,12 @@ static struct dbs_tuners {
 	unsigned int sampling_down_factor;
 	int          powersave_bias;
 	unsigned int io_is_busy;
-#if defined(__MP_DECISION_PATCH__)
-	unsigned int cpu_utilization;
-#endif
-	/* msm8960 tuners */
-	unsigned int freq_step;
 } dbs_tuners_ins = {
 	.up_threshold = DEF_FREQUENCY_UP_THRESHOLD,
 	.sampling_down_factor = DEF_SAMPLING_DOWN_FACTOR,
 	.down_differential = DEF_FREQUENCY_DOWN_DIFFERENTIAL,
 	.ignore_nice = 0,
 	.powersave_bias = 0,
-#if defined(__MP_DECISION_PATCH__)
-	.cpu_utilization = 0,
-#endif
-	.freq_step = DEF_FREQ_STEP,
 };
 
 static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
@@ -168,18 +158,15 @@ static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
 
 static inline cputime64_t get_cpu_idle_time(unsigned int cpu, cputime64_t *wall)
 {
-	u64 idle_time = get_cpu_idle_time_us(cpu, NULL);
+	u64 idle_time = get_cpu_idle_time_us(cpu, wall);
 
 	if (idle_time == -1ULL)
 		return get_cpu_idle_time_jiffy(cpu, wall);
-	else
-		idle_time += get_cpu_iowait_time_us(cpu, wall);
 
 	return idle_time;
 }
 
-static inline cputime64_t get_cpu_iowait_time(unsigned int cpu,
-						cputime64_t *wall)
+static inline cputime64_t get_cpu_iowait_time(unsigned int cpu, cputime64_t *wall)
 {
 	u64 iowait_time = get_cpu_iowait_time_us(cpu, wall);
 
@@ -536,12 +523,6 @@ static void dbs_freq_increase(struct cpufreq_policy *p, unsigned int freq)
 static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 {
 	unsigned int max_load_freq;
-#if defined(__MP_DECISION_PATCH__)
-	/* Extrapolated load of this CPU */
-	unsigned int load_at_max_freq = 0;
-	/* Current load across   this CPU */
-	unsigned int cur_load = 0;
-#endif
 
 	struct cpufreq_policy *policy;
 	unsigned int j;
@@ -568,11 +549,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 		struct cpu_dbs_info_s *j_dbs_info;
 		cputime64_t cur_wall_time, cur_idle_time, cur_iowait_time;
 		unsigned int idle_time, wall_time, iowait_time;
-#if defined(__MP_DECISION_PATCH__)
-		unsigned int load_freq;
-#else
 		unsigned int load, load_freq;
-#endif
 		int freq_avg;
 
 		j_dbs_info = &per_cpu(od_cpu_dbs_info, j);
@@ -622,43 +599,38 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 		if (unlikely(!wall_time || wall_time < idle_time))
 			continue;
 
-#if defined(__MP_DECISION_PATCH__)
-		cur_load = 100 * (wall_time - idle_time) / wall_time;
-#else
 		load = 100 * (wall_time - idle_time) / wall_time;
-#endif
 
 		freq_avg = __cpufreq_driver_getavg(policy, j);
 		if (freq_avg <= 0)
 			freq_avg = policy->cur;
 
-#if defined(__MP_DECISION_PATCH__)
-		load_freq = cur_load * freq_avg;
-#else
 		load_freq = load * freq_avg;
-#endif
 		if (load_freq > max_load_freq)
 			max_load_freq = load_freq;
 	}
-#if defined(__MP_DECISION_PATCH__)
-	/* calculate the scaled load across CPU */
-	load_at_max_freq = (cur_load * policy->cur)/policy->cpuinfo.max_freq;
 
-	/* add cpu_utilization */
-	dbs_tuners_ins.cpu_utilization = load_at_max_freq;
-	cpufreq_notify_utilization(policy, dbs_tuners_ins.cpu_utilization);
-#endif
-
-	/* Check for frequency increase *//*increasing by freq_step*/
+	/* Check for frequency increase */
 	if (max_load_freq > dbs_tuners_ins.up_threshold * policy->cur) {
-		int inc = (policy->max * dbs_tuners_ins.freq_step) / 100;
-		int target = min(policy->max, policy->cur + inc);
+#if defined (CONFIG_TARGET_LOCALE_USA)
 		/* If switching to max speed, apply sampling_down_factor */
-		if (policy->cur < policy->max && target == policy->max)
+		if (policy->cur < policy->max) {
+			if (policy->cur < 540000) dbs_freq_increase(policy, 810000);
+			else if (policy->cur < 864000) dbs_freq_increase(policy, 1026000);
+			else {
+				this_dbs_info->rate_mult = dbs_tuners_ins.sampling_down_factor;
+				dbs_freq_increase(policy, policy->max);
+			}
+		}
+		return;
+#else 
+		/* If switching to max speed, apply sampling_down_factor */
+		if (policy->cur < policy->max)
 			this_dbs_info->rate_mult =
 				dbs_tuners_ins.sampling_down_factor;
-		dbs_freq_increase(policy, target);
+		dbs_freq_increase(policy, policy->max);
 		return;
+#endif
 	}
 
 	/* Check for frequency decrease */
@@ -808,7 +780,35 @@ static void dbs_refresh_callback(struct work_struct *unused)
 static void dbs_input_event(struct input_handle *handle, unsigned int type,
 		unsigned int code, int value)
 {
-	return;
+	int i;
+
+#if 1 /* samsung feature */
+	int found = 0;
+#endif
+
+	if ((dbs_tuners_ins.powersave_bias == POWERSAVE_BIAS_MAXLEVEL) ||
+		(dbs_tuners_ins.powersave_bias == POWERSAVE_BIAS_MINLEVEL)) {
+		/* nothing to do */
+		return;
+	}
+
+#if 1 /* samsung feature */
+	/* only sec touchevent */
+	if (!strncmp(handle->dev->name,
+			"sec_touchscreen", strlen("sec_touchscreen"))) {
+		found = 1;
+	} else if (!strncmp(handle->dev->name,
+			"sec_e-pen", strlen("sec_e-pen"))) {
+		found = 1;
+	}
+
+	if(!found)
+		return;
+#endif
+	i = 0;
+/*	for_each_online_cpu(i) */{
+		queue_work_on(i, input_wq, &per_cpu(dbs_refresh_work, i));
+	}
 }
 
 static int dbs_input_connect(struct input_handler *handler,
@@ -920,7 +920,8 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 				    latency * LATENCY_MULTIPLIER);
 			dbs_tuners_ins.io_is_busy = should_io_be_busy();
 		}
-
+		if (!cpu)
+			rc = input_register_handler(&dbs_input_handler);
 		mutex_unlock(&dbs_mutex);
 
 		mutex_init(&this_dbs_info->timer_mutex);
@@ -941,7 +942,8 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		/* If device is being removed, policy is no longer
 		 * valid. */
 		this_dbs_info->cur_policy = NULL;
-
+		if (!cpu)
+			input_unregister_handler(&dbs_input_handler);
 		mutex_unlock(&dbs_mutex);
 		if (!dbs_enable)
 			sysfs_remove_group(cpufreq_global_kobject,
