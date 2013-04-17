@@ -77,8 +77,10 @@ GSYMS
 GTAGS
 
 *.orig
+*.rej
 *~
 \#*#
+patch-
 
 /*.log
 /setup-*
